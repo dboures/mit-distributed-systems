@@ -1,48 +1,101 @@
 package mr
 
-import "fmt"
-import "log"
-import "net/rpc"
-import "hash/fnv"
+import (
+	"fmt"
+	"hash/fnv"
+	"io/ioutil"
+	"log"
+	"net/rpc"
+	"os"
+	"time"
+)
 
-
-//
 // Map functions return a slice of KeyValue.
-//
 type KeyValue struct {
 	Key   string
 	Value string
 }
 
-//
 // use ihash(key) % NReduce to choose the reduce
 // task number for each KeyValue emitted by Map.
-//
 func ihash(key string) int {
 	h := fnv.New32a()
 	h.Write([]byte(key))
 	return int(h.Sum32() & 0x7fffffff)
 }
 
-
-//
 // main/mrworker.go calls this function.
-//
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
-	// Your worker implementation here.
+	registerRequest := RegisterWorkerArgs{}
+	registerReply := RegisterWorkerResponse{}
+	registered := call("Coordinator.RegisterWorker", &registerRequest, &registerReply)
+	if registered {
+		fmt.Printf("Worker Registered: %d\n", registerReply.WorkerId)
+	} else {
+		return
+	}
 
-	// uncomment to send the Example RPC to the coordinator.
-	// CallExample()
+	workerId := registerReply.WorkerId
 
+	for {
+		taskRequest := AssignTaskArgs{WorkerId: workerId}
+		taskReply := AssignTaskResponse{}
+		fmt.Printf("Worker %d requesting task\n", workerId)
+		ok := call("Coordinator.AssignTask", &taskRequest, &taskReply)
+		if ok {
+			if taskReply.Type == Map {
+				fmt.Printf("map task\n")
+
+				// read file
+				file, err := os.Open(taskReply.Filename)
+				if err != nil {
+					log.Fatalf("cannot open %v", taskReply.Filename)
+				}
+				content, err := ioutil.ReadAll(file)
+				if err != nil {
+					log.Fatalf("cannot read %v", taskReply.Filename)
+				}
+				file.Close()
+				//map
+				result := mapf(taskReply.Filename, string(content))
+				fmt.Printf("%d\n", len(result))
+				// TODO: write to disk
+				mapResponseArgs := MapDoneArgs{
+					WorkerId: workerId,
+					TaskId:   taskReply.TaskId,
+				}
+				mapResponseReply := MapDoneResponse{}
+				processReduce := call("Coordinator.ProcessMap", &mapResponseArgs, &mapResponseReply)
+				if !processReduce {
+					fmt.Printf("ProcessMap call failed!\n")
+				}
+			} else if taskReply.Type == Reduce {
+				fmt.Printf("reduce task\n")
+				// result := reducef(taskReply.Filename, taskReply.ReduceContent)
+				// actually need to send back??
+				reduceResponseArgs := ReduceDoneArgs{
+					WorkerId: workerId,
+				}
+				reducResponseReply := ReduceDoneResponse{}
+				processReduce := call("Coordinator.ProcessReduce", &reduceResponseArgs, &reducResponseReply)
+				if !processReduce {
+					fmt.Printf("ProcessReduce call failed!\n")
+				}
+			} else {
+				fmt.Printf("Worker %d sleeping\n", workerId)
+				time.Sleep(3 * time.Second)
+			}
+		} else {
+			fmt.Printf("GetTask call failed!\n")
+		}
+	}
 }
 
-//
 // example function to show how to make an RPC call to the coordinator.
 //
 // the RPC argument and reply types are defined in rpc.go.
-//
 func CallExample() {
 
 	// declare an argument structure.
@@ -67,11 +120,9 @@ func CallExample() {
 	}
 }
 
-//
 // send an RPC request to the coordinator, wait for the response.
 // usually returns true.
 // returns false if something goes wrong.
-//
 func call(rpcname string, args interface{}, reply interface{}) bool {
 	// c, err := rpc.DialHTTP("tcp", "127.0.0.1"+":1234")
 	sockname := coordinatorSock()
