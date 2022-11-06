@@ -1,12 +1,14 @@
 package mr
 
 import (
+	"encoding/json"
 	"fmt"
 	"hash/fnv"
 	"io/ioutil"
 	"log"
 	"net/rpc"
 	"os"
+	"sort"
 	"time"
 )
 
@@ -15,6 +17,14 @@ type KeyValue struct {
 	Key   string
 	Value string
 }
+
+// for sorting by key.
+type ByKey []KeyValue
+
+// for sorting by key.
+func (a ByKey) Len() int           { return len(a) }
+func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
 // use ihash(key) % NReduce to choose the reduce
 // task number for each KeyValue emitted by Map.
@@ -48,8 +58,8 @@ func Worker(mapf func(string, string) []KeyValue,
 			if taskReply.Type == Map {
 				DoMap(taskReply, workerId, mapf)
 			} else if taskReply.Type == Reduce {
-				// DoReduce(taskReply, workerId, reducef)
-				time.Sleep(3 * time.Second)
+				DoReduce(taskReply, workerId, reducef)
+				// time.Sleep(3 * time.Second)
 			} else {
 				fmt.Printf("Worker %d sleeping\n", workerId)
 				time.Sleep(3 * time.Second)
@@ -77,20 +87,18 @@ func DoMap(mapTask AssignTaskResponse, workerId int, mapf func(string, string) [
 	result := mapf(mapTask.Filename, string(content))
 	fmt.Printf("%d\n", len(result))
 
-	// Write to disk
-	oname := fmt.Sprintf("map-out-%d", mapTask.TaskId)
-	ofile, _ := os.Create(oname)
-
+	// collect keys
 	keys := make([]string, len(result))
-
 	i := 0
 	for i < len(result) {
 		keys[i] = result[i].Key
-		fmt.Fprintf(ofile, "%v\n", result[i])
 		i += 1
 	}
 
-	ofile.Close()
+	// Write to disk
+	oname := fmt.Sprintf("map-out-%d", mapTask.TaskId)
+	x, _ := json.MarshalIndent(result, "", " ")
+	_ = ioutil.WriteFile(oname, x, 0644)
 
 	mapResponseArgs := MapDoneArgs{
 		WorkerId: workerId,
@@ -108,21 +116,68 @@ func DoReduce(reduceTask AssignTaskResponse, workerId int, reducef func(string, 
 	fmt.Printf("reduce task\n")
 
 	// read all files, create intermediate
+	intermediate := []KeyValue{}
+	k := 0
+	for k < reduceTask.NumIntermediates {
+		readName := fmt.Sprintf("map-out-%d", k)
+		fileContent, err := ioutil.ReadFile(readName)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		data := []KeyValue{}
+
+		_ = json.Unmarshal([]byte(fileContent), &data)
+
+		// Convert []byte to string
+		// splitted := strings.Split(string(fileContent), "\n")
+		intermediate = append(intermediate, data...)
+
+		k += 1
+	}
 
 	// do reduce
+	sort.Sort(ByKey(intermediate))
 
-	// save output
+	fmt.Println(intermediate[0:5])
 
-	// // result := reducef(taskReply.Filename, taskReply.ReduceContent)
-	// // actually need to send back??
-	// reduceResponseArgs := ReduceDoneArgs{
-	// 	WorkerId: workerId,
-	// }
-	// reducResponseReply := ReduceDoneResponse{}
-	// processReduce := call("Coordinator.ProcessReduce", &reduceResponseArgs, &reducResponseReply)
-	// if !processReduce {
-	// 	fmt.Printf("ProcessReduce call failed!\n")
-	// }
+	oname := fmt.Sprintf("mr-out-%d", reduceTask.TaskId)
+	ofile, _ := os.Create(oname)
+
+	z := 0
+	i := 0
+	// iterate by word group, as long as we still have content to get through
+	for z < len(reduceTask.ReduceContent) && i < len(intermediate) {
+		j := i + 1
+		for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
+			j++
+		}
+		// If key is in our list, we can write a result
+		if intermediate[i].Key == reduceTask.ReduceContent[z] {
+			values := []string{}
+			for k := i; k < j; k++ {
+				values = append(values, intermediate[k].Value)
+			}
+			output := reducef(intermediate[i].Key, values)
+
+			// this is the correct format for each line of Reduce output.
+			fmt.Fprintf(ofile, "%v %v\n", intermediate[i].Key, output)
+			z += 1
+		}
+		i = j
+	}
+
+	ofile.Close()
+
+	reduceResponseArgs := ReduceDoneArgs{
+		WorkerId: workerId,
+		TaskId:   reduceTask.TaskId,
+	}
+	reduceResponseReply := ReduceDoneResponse{}
+	processReduce := call("Coordinator.ReduceDone", &reduceResponseArgs, &reduceResponseReply)
+	if !processReduce {
+		fmt.Printf("ReduceDone call failed!\n")
+	}
 }
 
 // example function to show how to make an RPC call to the coordinator.

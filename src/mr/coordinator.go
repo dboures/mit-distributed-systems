@@ -108,7 +108,7 @@ func AssignReduce(c *Coordinator, args *AssignTaskArgs, reply *AssignTaskRespons
 		}
 	}
 	if i == -1 {
-		fmt.Printf("Reduce tasks all asigned \n")
+		fmt.Printf("Reduce tasks all assigned \n")
 		c.ReduceComplete = true
 		reply.Type = Sleep
 	} else {
@@ -166,7 +166,7 @@ func (c *Coordinator) MapDone(args *MapDoneArgs, reply *MapDoneResponse) error {
 	return nil
 }
 
-func (c *Coordinator) ProcessReduce(args *ReduceDoneArgs, reply *ReduceDoneResponse) error {
+func (c *Coordinator) ReduceDone(args *ReduceDoneArgs, reply *ReduceDoneResponse) error {
 	fmt.Printf("Processing reduce job: %d from worker %d \n", args.TaskId, args.WorkerId)
 	c.mu.Lock()
 	c.ReduceTasks[args.TaskId].Status = Completed
