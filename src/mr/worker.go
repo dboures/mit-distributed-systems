@@ -46,51 +46,83 @@ func Worker(mapf func(string, string) []KeyValue,
 		ok := call("Coordinator.AssignTask", &taskRequest, &taskReply)
 		if ok {
 			if taskReply.Type == Map {
-				fmt.Printf("map task\n")
-
-				// read file
-				file, err := os.Open(taskReply.Filename)
-				if err != nil {
-					log.Fatalf("cannot open %v", taskReply.Filename)
-				}
-				content, err := ioutil.ReadAll(file)
-				if err != nil {
-					log.Fatalf("cannot read %v", taskReply.Filename)
-				}
-				file.Close()
-				//map
-				result := mapf(taskReply.Filename, string(content))
-				fmt.Printf("%d\n", len(result))
-				// TODO: write to disk
-				mapResponseArgs := MapDoneArgs{
-					WorkerId: workerId,
-					TaskId:   taskReply.TaskId,
-				}
-				mapResponseReply := MapDoneResponse{}
-				processReduce := call("Coordinator.ProcessMap", &mapResponseArgs, &mapResponseReply)
-				if !processReduce {
-					fmt.Printf("ProcessMap call failed!\n")
-				}
+				DoMap(taskReply, workerId, mapf)
 			} else if taskReply.Type == Reduce {
-				fmt.Printf("reduce task\n")
-				// result := reducef(taskReply.Filename, taskReply.ReduceContent)
-				// actually need to send back??
-				reduceResponseArgs := ReduceDoneArgs{
-					WorkerId: workerId,
-				}
-				reducResponseReply := ReduceDoneResponse{}
-				processReduce := call("Coordinator.ProcessReduce", &reduceResponseArgs, &reducResponseReply)
-				if !processReduce {
-					fmt.Printf("ProcessReduce call failed!\n")
-				}
+				// DoReduce(taskReply, workerId, reducef)
+				time.Sleep(3 * time.Second)
 			} else {
 				fmt.Printf("Worker %d sleeping\n", workerId)
 				time.Sleep(3 * time.Second)
 			}
 		} else {
-			fmt.Printf("GetTask call failed!\n")
+			fmt.Printf("AssignTask call failed!\n")
 		}
 	}
+}
+
+func DoMap(mapTask AssignTaskResponse, workerId int, mapf func(string, string) []KeyValue) {
+	fmt.Printf("map task\n")
+
+	// read file
+	file, err := os.Open(mapTask.Filename)
+	if err != nil {
+		log.Fatalf("cannot open %v", mapTask.Filename)
+	}
+	content, err := ioutil.ReadAll(file)
+	if err != nil {
+		log.Fatalf("cannot read %v", mapTask.Filename)
+	}
+	file.Close()
+	//map
+	result := mapf(mapTask.Filename, string(content))
+	fmt.Printf("%d\n", len(result))
+
+	// Write to disk
+	oname := fmt.Sprintf("map-out-%d", mapTask.TaskId)
+	ofile, _ := os.Create(oname)
+
+	keys := make([]string, len(result))
+
+	i := 0
+	for i < len(result) {
+		keys[i] = result[i].Key
+		fmt.Fprintf(ofile, "%v\n", result[i])
+		i += 1
+	}
+
+	ofile.Close()
+
+	mapResponseArgs := MapDoneArgs{
+		WorkerId: workerId,
+		TaskId:   mapTask.TaskId,
+		Keys:     keys,
+	}
+	mapResponseReply := MapDoneResponse{}
+	processReduce := call("Coordinator.MapDone", &mapResponseArgs, &mapResponseReply)
+	if !processReduce {
+		fmt.Printf("MapDone call failed!\n")
+	}
+}
+
+func DoReduce(reduceTask AssignTaskResponse, workerId int, reducef func(string, []string) string) {
+	fmt.Printf("reduce task\n")
+
+	// read all files, create intermediate
+
+	// do reduce
+
+	// save output
+
+	// // result := reducef(taskReply.Filename, taskReply.ReduceContent)
+	// // actually need to send back??
+	// reduceResponseArgs := ReduceDoneArgs{
+	// 	WorkerId: workerId,
+	// }
+	// reducResponseReply := ReduceDoneResponse{}
+	// processReduce := call("Coordinator.ProcessReduce", &reduceResponseArgs, &reducResponseReply)
+	// if !processReduce {
+	// 	fmt.Printf("ProcessReduce call failed!\n")
+	// }
 }
 
 // example function to show how to make an RPC call to the coordinator.

@@ -37,10 +37,11 @@ type AssignTaskArgs struct {
 }
 
 type AssignTaskResponse struct {
-	Filename      string
-	ReduceContent []string
-	Type          TaskType
-	TaskId        int
+	Filename         string
+	ReduceContent    []string
+	Type             TaskType
+	TaskId           int
+	NumIntermediates int
 }
 
 // Once a Map job is done, we need to do a "shuffle". Ultimately the results of each map operation are stored locally on the workers.
@@ -51,6 +52,7 @@ type AssignTaskResponse struct {
 type MapDoneArgs struct {
 	TaskId   int
 	WorkerId int
+	Keys     []string
 }
 
 // Coordinator's response to the worker's Map results
@@ -59,6 +61,7 @@ type MapDoneResponse struct {
 
 // Contains the output of a worker's Reduce job
 type ReduceDoneArgs struct {
+	TaskId   int
 	WorkerId int
 }
 
