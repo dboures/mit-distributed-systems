@@ -52,7 +52,7 @@ func Worker(mapf func(string, string) []KeyValue,
 	for {
 		taskRequest := AssignTaskArgs{WorkerId: workerId}
 		taskReply := AssignTaskResponse{}
-		fmt.Printf("Worker %d requesting task\n", workerId)
+		// fmt.Printf("Worker %d requesting task\n", workerId)
 		ok := call("Coordinator.AssignTask", &taskRequest, &taskReply)
 		if ok {
 			if taskReply.Type == Map {
@@ -60,9 +60,12 @@ func Worker(mapf func(string, string) []KeyValue,
 			} else if taskReply.Type == Reduce {
 				DoReduce(taskReply, workerId, reducef)
 				// time.Sleep(3 * time.Second)
+			} else if taskReply.Type == Terminate {
+				fmt.Printf("Shutting down worker %d\n", workerId)
+				return
 			} else {
 				fmt.Printf("Worker %d sleeping\n", workerId)
-				time.Sleep(3 * time.Second)
+				time.Sleep(2 * time.Second)
 			}
 		} else {
 			fmt.Printf("AssignTask call failed!\n")
@@ -71,7 +74,7 @@ func Worker(mapf func(string, string) []KeyValue,
 }
 
 func DoMap(mapTask AssignTaskResponse, workerId int, mapf func(string, string) []KeyValue) {
-	fmt.Printf("map task\n")
+	// fmt.Printf("map task\n")
 
 	// read file
 	file, err := os.Open(mapTask.Filename)
@@ -85,7 +88,7 @@ func DoMap(mapTask AssignTaskResponse, workerId int, mapf func(string, string) [
 	file.Close()
 	//map
 	result := mapf(mapTask.Filename, string(content))
-	fmt.Printf("%d\n", len(result))
+	// fmt.Printf("%d\n", len(result))
 
 	// collect keys
 	keys := make([]string, len(result))
@@ -113,7 +116,7 @@ func DoMap(mapTask AssignTaskResponse, workerId int, mapf func(string, string) [
 }
 
 func DoReduce(reduceTask AssignTaskResponse, workerId int, reducef func(string, []string) string) {
-	fmt.Printf("reduce task\n")
+	// fmt.Printf("reduce task\n")
 
 	// read all files, create intermediate
 	intermediate := []KeyValue{}
@@ -138,8 +141,6 @@ func DoReduce(reduceTask AssignTaskResponse, workerId int, reducef func(string, 
 
 	// do reduce
 	sort.Sort(ByKey(intermediate))
-
-	fmt.Println(intermediate[0:5])
 
 	oname := fmt.Sprintf("mr-out-%d", reduceTask.TaskId)
 	ofile, _ := os.Create(oname)

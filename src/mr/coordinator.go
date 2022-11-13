@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/rpc"
 	"os"
+	"sort"
 	"sync"
 	"time"
 )
@@ -54,14 +55,14 @@ func (c *Coordinator) RegisterWorker(args *RegisterWorkerArgs, reply *RegisterWo
 	c.mu.Lock()
 	workerId := len(c.WorkerIds)
 	c.WorkerIds = append(c.WorkerIds, workerId)
-	fmt.Printf("New worker registered. Now there are %v Workers \n", len(c.WorkerIds))
+	// fmt.Printf("New worker registered. Now there are %v Workers \n", len(c.WorkerIds))
 	reply.WorkerId = workerId
 	c.mu.Unlock()
 	return nil
 }
 
 func (c *Coordinator) AssignTask(args *AssignTaskArgs, reply *AssignTaskResponse) error {
-	fmt.Printf("Task Requested from: %d\n", args.WorkerId)
+	// fmt.Printf("Task Requested from: %d\n", args.WorkerId)
 
 	c.mu.Lock()
 
@@ -69,6 +70,8 @@ func (c *Coordinator) AssignTask(args *AssignTaskArgs, reply *AssignTaskResponse
 		AssignMap(c, args, reply)
 	} else if c.MapComplete && !c.ReduceComplete {
 		AssignReduce(c, args, reply)
+	} else if c.MapComplete && c.ReduceComplete {
+		AssignTerminate(c, args, reply)
 	} else {
 		reply.Type = Sleep
 	}
@@ -87,11 +90,12 @@ func AssignMap(c *Coordinator, args *AssignTaskArgs, reply *AssignTaskResponse) 
 		}
 	}
 	if i == -1 {
-		fmt.Printf("Map tasks all assigned \n")
+		// fmt.Printf("Map tasks all assigned \n")
 		reply.Type = Sleep
 	} else {
-		fmt.Printf("Assigning map task: %d (%s) to worker %d \n", i, c.MapTasks[i].FileName, args.WorkerId)
+		// fmt.Printf("Assigning map task: %d (%s) to worker %d \n", i, c.MapTasks[i].FileName, args.WorkerId)
 		c.MapTasks[i].Status = Ongoing
+		c.MapTasks[i].StartTime = time.Now()
 		reply.Filename = c.MapTasks[i].FileName
 		reply.TaskId = i
 		reply.Type = Map
@@ -108,17 +112,21 @@ func AssignReduce(c *Coordinator, args *AssignTaskArgs, reply *AssignTaskRespons
 		}
 	}
 	if i == -1 {
-		fmt.Printf("Reduce tasks all assigned \n")
-		c.ReduceComplete = true
+		// fmt.Printf("Reduce tasks all assigned \n")
 		reply.Type = Sleep
 	} else {
-		fmt.Printf("Assigning reduce task: %d to worker %d \n", i, args.WorkerId)
+		// fmt.Printf("Assigning reduce task: %d to worker %d \n", i, args.WorkerId)
 		c.ReduceTasks[i].Status = Ongoing
+		c.ReduceTasks[i].StartTime = time.Now()
 		reply.ReduceContent = c.ReduceTasks[i].ReduceContent
 		reply.NumIntermediates = c.NumIntermediates
 		reply.TaskId = i
 		reply.Type = Reduce
 	}
+}
+
+func AssignTerminate(c *Coordinator, args *AssignTaskArgs, reply *AssignTaskResponse) {
+	reply.TaskId = Terminate
 }
 
 func ConditionalCreateReduce(c *Coordinator) {
@@ -130,8 +138,15 @@ func ConditionalCreateReduce(c *Coordinator) {
 
 		tasks := make([][]string, c.NumReduce)
 
+		keys := make([]string, 0, len(c.Keys))
+
+		for k := range c.Keys {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+
 		i := 1
-		for key, _ := range c.Keys {
+		for _, key := range keys {
 			tasks[i] = append(tasks[i], key)
 			i += 1
 			if i == c.NumReduce {
@@ -191,14 +206,17 @@ func (c *Coordinator) server() {
 // main/mrcoordinator.go calls Done() periodically to find out
 // if the entire job has finished.
 func (c *Coordinator) Done() bool {
-	fmt.Printf("Checking Done\n")
+	// fmt.Printf("Checking Done\n")
 	c.mu.Lock()
 
-	// TODO: check start times and set Ongoing jobs to Idle if we need to
 	if !c.MapComplete {
 		i := 0
 		for i < len(c.MapTasks) {
 			if c.MapTasks[i].Status != Completed {
+				elapsed := time.Since(c.MapTasks[i].StartTime)
+				if elapsed.Seconds() > 15 {
+					c.MapTasks[i].Status = Idle
+				}
 				break
 			}
 			i += 1
@@ -206,6 +224,24 @@ func (c *Coordinator) Done() bool {
 		if i == len(c.MapTasks) {
 			fmt.Printf("Map stage complete\n")
 			c.MapComplete = true
+		}
+	}
+
+	if !c.ReduceComplete {
+		j := 0
+		for j < len(c.ReduceTasks) {
+			if c.ReduceTasks[j].Status != Completed {
+				elapsed := time.Since(c.ReduceTasks[j].StartTime)
+				if elapsed.Seconds() > 15 {
+					c.ReduceTasks[j].Status = Idle
+				}
+				break
+			}
+			j += 1
+		}
+		if j > 0 && j == len(c.ReduceTasks) {
+			fmt.Printf("Reduce stage complete\n")
+			c.ReduceComplete = true
 		}
 	}
 

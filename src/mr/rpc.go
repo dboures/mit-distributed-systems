@@ -14,9 +14,10 @@ import (
 type TaskType int
 
 const (
-	Map    TaskType = 0
-	Reduce          = 1
-	Sleep           = 2
+	Map       TaskType = 0
+	Reduce             = 1
+	Sleep              = 2
+	Terminate          = 3
 )
 
 //
