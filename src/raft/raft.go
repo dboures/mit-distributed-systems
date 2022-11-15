@@ -25,6 +25,7 @@ import (
 
 	//	"6.824/labgob"
 
+	"fmt"
 	"math/rand"
 	"time"
 
@@ -180,6 +181,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateId
 		rf.currentTerm = args.Term
+		rf.role = Follower
 
 		// fmt.Printf("Peer %d votedFor: %d. Reqor: %d, %d, %d, %d, %d\n", rf.me, rf.votedFor, args.CandidateId, args.LastLogIndex, rf.commitIndex, args.LastLogTerm, rf.currentTerm)
 		// fmt.Printf("%d, >= %d, %t\n", args.LastLogIndex, rf.commitIndex, args.LastLogIndex >= rf.commitIndex)
@@ -189,13 +191,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) && args.LastLogIndex >= rf.commitIndex && args.LastLogTerm >= rf.currentTerm {
 			reply.VoteGranted = true
 			rf.votedFor = args.CandidateId
-			rf.currentTerm = args.Term
+			rf.role = Follower
 		}
 	} else {
 		reply.VoteGranted = false
 	}
 
-	// fmt.Printf("%s \t Peer %d sending leader vote: %t to %d. VotedFor: %d Peer term: %d, Arg term: %d\n", time.Now().Truncate(time.Millisecond), rf.me, reply.VoteGranted, args.CandidateId, rf.votedFor, rf.currentTerm, args.Term)
+	fmt.Printf("%s \t Peer %d sending leader vote: %t to %d. VotedFor: %d Peer term: %d, Arg term: %d\n", time.Now().Truncate(time.Millisecond), rf.me, reply.VoteGranted, args.CandidateId, rf.votedFor, rf.currentTerm, args.Term)
 	rf.mu.Unlock()
 }
 
@@ -250,11 +252,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	// fmt.Printf("Peer %d received heartbeat \n", rf.me)
 	rf.lastHeartbeat = time.Now()
-	rf.votedFor = -1
-	if rf.role == Candidate || args.Term > rf.currentTerm {
+	if args.Term > rf.currentTerm {
+		rf.votedFor = -1
+		rf.currentTerm = args.Term
 		rf.role = Follower
 	}
-	rf.currentTerm = args.Term
 
 	// fmt.Printf("Peer %d received heartbeat and now its a %d\n", rf.me, rf.role)
 	// if args.Term >= rf.currentTerm && rf.role == Follower {
@@ -329,9 +331,10 @@ func (rf *Raft) ticker() {
 
 		// fmt.Printf("Peer %d last heartbeat at: %s \n", rf.me, rf.lastHeartbeat.Truncate(time.Second))
 		// fmt.Printf("Peer %d current time: %s, next election at: %s \n", rf.me, time.Now().Truncate(time.Second), nextElection.Truncate(time.Second))
+		isLeader := rf.role == Leader
 		rf.mu.Unlock()
 
-		if now.After(nextElection) {
+		if now.After(nextElection) && !isLeader {
 			doLeaderElection(rf)
 		}
 	}
@@ -356,10 +359,12 @@ func (rf *Raft) heartbeat() {
 			rf.mu.Unlock()
 
 			for i := range rf.peers {
-				reply := AppendEntriesReply{}
-				go func(k int) {
-					rf.sendAppendEntries(k, &args, &reply)
-				}(i)
+				if i != rf.me {
+					reply := AppendEntriesReply{}
+					go func(k int) {
+						rf.sendAppendEntries(k, &args, &reply)
+					}(i)
+				}
 			}
 		} else {
 			rf.mu.Unlock()
@@ -373,7 +378,7 @@ func doLeaderElection(rf *Raft) {
 		rf.votedFor = rf.me
 		rf.role = Candidate
 		rf.currentTerm = rf.currentTerm + 1
-		// fmt.Printf("%s \t Peer %d starting leader election at term: %d\n", time.Now().Truncate(time.Millisecond), rf.me, rf.currentTerm)
+		fmt.Printf("%s \t Peer %d starting leader election at term: %d\n", time.Now().Truncate(time.Millisecond), rf.me, rf.currentTerm)
 		args := RequestVoteArgs{
 			Term:         rf.currentTerm,
 			CandidateId:  rf.me,
@@ -401,7 +406,7 @@ func doLeaderElection(rf *Raft) {
 
 					if yesTally > len(rf.peers)/2 {
 						rf.role = Leader
-						// fmt.Printf("%s \t Peer %d is now the leader\n", time.Now().Truncate(time.Millisecond), rf.me)
+						fmt.Printf("%s \t Peer %d is now the leader\n", time.Now().Truncate(time.Millisecond), rf.me)
 					}
 					rf.mu.Unlock()
 				}
