@@ -24,7 +24,7 @@ import (
 	"sync/atomic"
 
 	//	"6.824/labgob"
-	"fmt"
+
 	"math/rand"
 	"time"
 
@@ -176,11 +176,16 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	rf.lastHeartbeat = time.Now()
 
-	if args.Term >= rf.currentTerm {
+	if args.Term > rf.currentTerm {
+		reply.VoteGranted = true
+		rf.votedFor = args.CandidateId
+		rf.currentTerm = args.Term
 
-		fmt.Printf("Peer %d votedFor: %d. Reqor: %d, %d, %d, %d, %d\n", rf.me, rf.votedFor, args.CandidateId, args.LastLogIndex, rf.commitIndex, args.LastLogTerm, rf.currentTerm)
+		// fmt.Printf("Peer %d votedFor: %d. Reqor: %d, %d, %d, %d, %d\n", rf.me, rf.votedFor, args.CandidateId, args.LastLogIndex, rf.commitIndex, args.LastLogTerm, rf.currentTerm)
 		// fmt.Printf("%d, >= %d, %t\n", args.LastLogIndex, rf.commitIndex, args.LastLogIndex >= rf.commitIndex)
 		// fmt.Printf("%d, >= %d, %t\n", args.LastLogTerm, rf.currentTerm, args.LastLogTerm >= rf.currentTerm)
+
+	} else if args.Term == rf.currentTerm {
 		if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) && args.LastLogIndex >= rf.commitIndex && args.LastLogTerm >= rf.currentTerm {
 			reply.VoteGranted = true
 			rf.votedFor = args.CandidateId
@@ -190,7 +195,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = false
 	}
 
-	fmt.Printf("Peer %d sending leader vote: %t to %d. Peer term: %d, Req term: %d\n", rf.me, reply.VoteGranted, args.CandidateId, rf.currentTerm, args.Term)
+	// fmt.Printf("%s \t Peer %d sending leader vote: %t to %d. VotedFor: %d Peer term: %d, Arg term: %d\n", time.Now().Truncate(time.Millisecond), rf.me, reply.VoteGranted, args.CandidateId, rf.votedFor, rf.currentTerm, args.Term)
 	rf.mu.Unlock()
 }
 
@@ -246,10 +251,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// fmt.Printf("Peer %d received heartbeat \n", rf.me)
 	rf.lastHeartbeat = time.Now()
 	rf.votedFor = -1
-	rf.currentTerm = args.Term
 	if rf.role == Candidate || args.Term > rf.currentTerm {
 		rf.role = Follower
 	}
+	rf.currentTerm = args.Term
+
+	// fmt.Printf("Peer %d received heartbeat and now its a %d\n", rf.me, rf.role)
 	// if args.Term >= rf.currentTerm && rf.role == Follower {
 	// 	rf.commitIndex += 1
 	// 	reply.Success = true
@@ -311,7 +318,7 @@ func (rf *Raft) ticker() {
 	for rf.killed() == false {
 
 		// sleep
-		interval := 1000 + (rand.Float64() * 1000)
+		interval := 500 + (rand.Float64() * 800)
 		duration := time.Duration(math.Round(interval)) * time.Millisecond
 
 		time.Sleep(duration)
@@ -346,14 +353,17 @@ func (rf *Raft) heartbeat() {
 				PrevLogTerm:  rf.currentTerm,
 			}
 
+			rf.mu.Unlock()
+
 			for i := range rf.peers {
 				reply := AppendEntriesReply{}
 				go func(k int) {
 					rf.sendAppendEntries(k, &args, &reply)
 				}(i)
 			}
+		} else {
+			rf.mu.Unlock()
 		}
-		rf.mu.Unlock()
 	}
 }
 
@@ -363,7 +373,7 @@ func doLeaderElection(rf *Raft) {
 		rf.votedFor = rf.me
 		rf.role = Candidate
 		rf.currentTerm = rf.currentTerm + 1
-		fmt.Printf("Peer %d starting leader election at term: %d\n", rf.me, rf.currentTerm)
+		// fmt.Printf("%s \t Peer %d starting leader election at term: %d\n", time.Now().Truncate(time.Millisecond), rf.me, rf.currentTerm)
 		args := RequestVoteArgs{
 			Term:         rf.currentTerm,
 			CandidateId:  rf.me,
@@ -391,8 +401,7 @@ func doLeaderElection(rf *Raft) {
 
 					if yesTally > len(rf.peers)/2 {
 						rf.role = Leader
-						rf.votedFor = -1
-						fmt.Printf("Peer %d is now the leader\n", rf.me)
+						// fmt.Printf("%s \t Peer %d is now the leader\n", time.Now().Truncate(time.Millisecond), rf.me)
 					}
 					rf.mu.Unlock()
 				}
