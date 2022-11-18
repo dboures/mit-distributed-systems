@@ -253,11 +253,23 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	// fmt.Printf("Peer %d received heartbeat \n", rf.me)
 	rf.lastHeartbeat = time.Now()
+
+	defer rf.mu.Unlock()
+
 	if args.Term > rf.currentTerm {
 		rf.votedFor = -1
 		rf.currentTerm = args.Term
 		rf.role = Follower
+	} else if args.Term < rf.currentTerm {
+		reply.Success = false
+		return
 	}
+
+	if rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm {
+		reply.Success = false
+		return
+	}
+
 	// else if args.Term == rf.currentTerm {
 
 	// } else {
@@ -271,7 +283,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// } else {
 	// 	reply.Success = false
 	// }
-	rf.mu.Unlock()
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
@@ -397,47 +408,51 @@ func doLeaderElection(rf *Raft) {
 
 		rf.mu.Unlock()
 
-		yesTally := 0
+		var yesTally uint64
 		for i := range rf.peers {
 			reply := RequestVoteReply{}
 
 			go func(k int, args RequestVoteArgs, reply RequestVoteReply) {
 				answer := rf.sendRequestVote(k, &args, &reply)
 				if answer {
-					rf.mu.Lock()
-					if reply.Term > rf.currentTerm {
-						rf.currentTerm = reply.Term
-						rf.role = Follower
-						rf.votedFor = -1
-					} else if reply.VoteGranted {
-						yesTally += 1
-					}
-
-					if yesTally > len(rf.peers)/2 && rf.role != Leader {
-						rf.role = Leader
-						fmt.Printf("%s \t Peer %d is now the leader\n", time.Now().Truncate(time.Millisecond), rf.me)
-						blankArgs := AppendEntriesArgs{
-							Term:         rf.currentTerm,
-							LeaderId:     rf.me,
-							PrevLogIndex: 0, //TODO
-							PrevLogTerm:  rf.currentTerm,
-							Entries:      make([]interface{}, 0),
-						}
-
-						for i := range rf.peers {
-							if i != rf.me {
-								reply := AppendEntriesReply{}
-								go func(k int) {
-									rf.sendAppendEntries(k, &blankArgs, &reply)
-								}(i)
-							}
-						}
-					}
-					rf.mu.Unlock()
+					handleLeaderVote(rf, args, reply, &yesTally)
 				}
 			}(i, args, reply)
 		}
 	}
+}
+
+func handleLeaderVote(rf *Raft, args RequestVoteArgs, reply RequestVoteReply, yesTally *uint64) {
+	rf.mu.Lock()
+	if reply.Term > rf.currentTerm {
+		rf.currentTerm = reply.Term
+		rf.role = Follower
+		rf.votedFor = -1
+	} else if reply.VoteGranted {
+		atomic.AddUint64(yesTally, 1)
+	}
+
+	if *yesTally > uint64(len(rf.peers)/2) && rf.role != Leader {
+		rf.role = Leader
+		fmt.Printf("%s \t Peer %d is now the leader\n", time.Now().Truncate(time.Millisecond), rf.me)
+		blankArgs := AppendEntriesArgs{
+			Term:         rf.currentTerm,
+			LeaderId:     rf.me,
+			PrevLogIndex: 0, //TODO
+			PrevLogTerm:  rf.currentTerm,
+			Entries:      make([]interface{}, 0),
+		}
+
+		for i := range rf.peers {
+			if i != rf.me {
+				reply := AppendEntriesReply{}
+				go func(k int) {
+					rf.sendAppendEntries(k, &blankArgs, &reply)
+				}(i)
+			}
+		}
+	}
+	rf.mu.Unlock()
 }
 
 // the service or tester wants to create a Raft server. the ports
