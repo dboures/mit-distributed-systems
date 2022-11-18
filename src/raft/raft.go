@@ -89,6 +89,7 @@ type Raft struct {
 
 	role          PeerStatus
 	lastHeartbeat time.Time
+	applyCh       chan ApplyMsg
 }
 
 // return currentTerm and whether this server
@@ -238,7 +239,7 @@ type AppendEntriesArgs struct {
 	LeaderId     int
 	PrevLogIndex int
 	PrevLogTerm  int
-	//entries
+	Entries      []interface{}
 	LeaderCommit int
 }
 
@@ -257,6 +258,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.currentTerm = args.Term
 		rf.role = Follower
 	}
+	// else if args.Term == rf.currentTerm {
+
+	// } else {
+	// 	reply.Success = false
+	// }
 
 	// fmt.Printf("Peer %d received heartbeat and now its a %d\n", rf.me, rf.role)
 	// if args.Term >= rf.currentTerm && rf.role == Follower {
@@ -286,10 +292,12 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 // term. the third return value is true if this server believes it is
 // the leader.
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
-
+	rf.mu.Lock()
+	index := rf.commitIndex + 1
+	term := rf.currentTerm
+	isLeader := rf.role == Leader
+	fmt.Printf("start called on peer %d  \n", rf.me)
+	rf.mu.Unlock()
 	// Your code here (2B).
 
 	return index, term, isLeader
@@ -352,8 +360,9 @@ func (rf *Raft) heartbeat() {
 			args := AppendEntriesArgs{
 				Term:         rf.currentTerm,
 				LeaderId:     rf.me,
-				PrevLogIndex: 0,
+				PrevLogIndex: 0, //TODO
 				PrevLogTerm:  rf.currentTerm,
+				Entries:      make([]interface{}, 0), // TODO
 			}
 
 			rf.mu.Unlock()
@@ -404,9 +413,25 @@ func doLeaderElection(rf *Raft) {
 						yesTally += 1
 					}
 
-					if yesTally > len(rf.peers)/2 {
+					if yesTally > len(rf.peers)/2 && rf.role != Leader {
 						rf.role = Leader
 						fmt.Printf("%s \t Peer %d is now the leader\n", time.Now().Truncate(time.Millisecond), rf.me)
+						blankArgs := AppendEntriesArgs{
+							Term:         rf.currentTerm,
+							LeaderId:     rf.me,
+							PrevLogIndex: 0, //TODO
+							PrevLogTerm:  rf.currentTerm,
+							Entries:      make([]interface{}, 0),
+						}
+
+						for i := range rf.peers {
+							if i != rf.me {
+								reply := AppendEntriesReply{}
+								go func(k int) {
+									rf.sendAppendEntries(k, &blankArgs, &reply)
+								}(i)
+							}
+						}
 					}
 					rf.mu.Unlock()
 				}
@@ -437,6 +462,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.commitIndex = 0
 	rf.lastApplied = 0
 	rf.votedFor = -1
+	rf.applyCh = applyCh
 
 	// Your initialization code here (2A, 2B, 2C).
 
