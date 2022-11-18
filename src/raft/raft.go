@@ -54,8 +54,9 @@ type ApplyMsg struct {
 }
 
 type Log struct {
-	Term int
-	// Command
+	Term    int
+	Index   int
+	Command interface{}
 }
 
 type PeerStatus int
@@ -239,7 +240,7 @@ type AppendEntriesArgs struct {
 	LeaderId     int
 	PrevLogIndex int
 	PrevLogTerm  int
-	Entries      []interface{}
+	Logs         []Log
 	LeaderCommit int
 }
 
@@ -261,28 +262,57 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.currentTerm = args.Term
 		rf.role = Follower
 	} else if args.Term < rf.currentTerm {
+		// #1
 		reply.Success = false
 		return
 	}
 
+	// #2
 	if rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm {
 		reply.Success = false
 		return
 	}
 
-	// else if args.Term == rf.currentTerm {
+	// #3
+	// first find matching index
+	logIndex := len(rf.logs)
+	for logIndex > 0 {
+		if args.Logs[0].Index > rf.logs[logIndex].Index {
+			break
+		}
+		logIndex -= 1
+	}
 
-	// } else {
-	// 	reply.Success = false
-	// }
+	appendIndex := 0
+	// check if any mismatching terms and delete from there
+	if logIndex < len(rf.logs) {
+		for logIndex <= len(rf.logs) {
+			oldLog := rf.logs[logIndex]
+			newLog := args.Logs[appendIndex]
 
-	// fmt.Printf("Peer %d received heartbeat and now its a %d\n", rf.me, rf.role)
-	// if args.Term >= rf.currentTerm && rf.role == Follower {
-	// 	rf.commitIndex += 1
-	// 	reply.Success = true
-	// } else {
-	// 	reply.Success = false
-	// }
+			if oldLog.Index == newLog.Index && oldLog.Term != newLog.Term {
+				rf.logs = rf.logs[0:logIndex]
+				break
+			}
+			logIndex += 1
+			appendIndex += 1
+		}
+	}
+
+	// #4
+	if appendIndex < len(args.Logs) {
+		rf.logs = append(rf.logs, args.Logs[appendIndex:]...)
+	}
+
+	// #5
+	if args.LeaderCommit > rf.commitIndex {
+		if args.LeaderCommit < rf.logs[len(rf.logs)-1].Index {
+			rf.commitIndex = args.LeaderCommit
+		} else {
+			rf.commitIndex = rf.logs[len(rf.logs)-1].Index
+		}
+	}
+
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
@@ -373,7 +403,7 @@ func (rf *Raft) heartbeat() {
 				LeaderId:     rf.me,
 				PrevLogIndex: 0, //TODO
 				PrevLogTerm:  rf.currentTerm,
-				Entries:      make([]interface{}, 0), // TODO
+				Logs:         make([]Log, 0), // TODO
 			}
 
 			rf.mu.Unlock()
@@ -440,7 +470,7 @@ func handleLeaderVote(rf *Raft, args RequestVoteArgs, reply RequestVoteReply, ye
 			LeaderId:     rf.me,
 			PrevLogIndex: 0, //TODO
 			PrevLogTerm:  rf.currentTerm,
-			Entries:      make([]interface{}, 0),
+			Logs:         make([]Log, 0),
 		}
 
 		for i := range rf.peers {
