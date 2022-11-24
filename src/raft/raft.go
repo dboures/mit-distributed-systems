@@ -199,7 +199,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = false
 	}
 
-	fmt.Printf("%s \t Peer %d sending leader vote: %t to %d. VotedFor: %d Peer term: %d, Arg term: %d\n", time.Now().Truncate(time.Millisecond), rf.me, reply.VoteGranted, args.CandidateId, rf.votedFor, rf.currentTerm, args.Term)
+	// fmt.Printf("%s \t Peer %d sending leader vote: %t to %d. VotedFor: %d Peer term: %d, Arg term: %d\n", time.Now().Truncate(time.Millisecond), rf.me, reply.VoteGranted, args.CandidateId, rf.votedFor, rf.currentTerm, args.Term)
 	rf.mu.Unlock()
 }
 
@@ -252,10 +252,12 @@ type AppendEntriesReply struct {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
-	// fmt.Printf("Peer %d received heartbeat \n", rf.me)
+	// fmt.Printf("Peer %d received appendentries, %d \n", rf.me, rf.commitIndex)
 	rf.lastHeartbeat = time.Now()
 
 	defer rf.mu.Unlock()
+
+	reply.Success = false
 
 	if args.Term > rf.currentTerm {
 		rf.votedFor = -1
@@ -263,19 +265,24 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.role = Follower
 	} else if args.Term < rf.currentTerm {
 		// #1
-		reply.Success = false
 		return
 	}
 
 	// #2
-	if rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm {
-		reply.Success = false
+	if len(args.Logs) == 0 {
+		return
+	}
+
+	// fmt.Printf("Peer %d PrevLogIndex, %d \n", rf.me, args.PrevLogIndex)
+	if len(rf.logs) > args.PrevLogIndex && rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm {
+		// fmt.Printf("Peer %d #2 exit %d, %d \n", rf.me, rf.logs[args.PrevLogIndex].Term, args.PrevLogTerm)
 		return
 	}
 
 	// #3
 	// first find matching index
-	logIndex := len(rf.logs)
+	logIndex := len(rf.logs) - 1
+	// fmt.Printf("Peer %d #3 logIndex %d \n", rf.me, logIndex)
 	for logIndex > 0 {
 		if args.Logs[0].Index > rf.logs[logIndex].Index {
 			break
@@ -285,13 +292,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	appendIndex := 0
 	// check if any mismatching terms and delete from there
-	if logIndex < len(rf.logs) {
-		for logIndex <= len(rf.logs) {
+	if logIndex < len(rf.logs)-1 && logIndex > 0 {
+		for logIndex <= len(rf.logs)-1 {
 			oldLog := rf.logs[logIndex]
 			newLog := args.Logs[appendIndex]
 
 			if oldLog.Index == newLog.Index && oldLog.Term != newLog.Term {
 				rf.logs = rf.logs[0:logIndex]
+				fmt.Printf("Peer %d #3 pruning log after index %d \n", rf.me, logIndex)
 				break
 			}
 			logIndex += 1
@@ -299,19 +307,40 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 	}
 
-	// #4
-	if appendIndex < len(args.Logs) {
-		rf.logs = append(rf.logs, args.Logs[appendIndex:]...)
+	//create a new Entries slice
+
+	newEntries := args.Logs[appendIndex:]
+
+	// #4: Append any new entries not already in the log
+	// fmt.Printf("Peer %d #4, append index: %d, \n", rf.me, appendIndex)
+	if len(newEntries) > 0 {
+		// fmt.Printf("Peer %d #4, append new entries \n", rf.me)
+		rf.logs = append(rf.logs, newEntries...)
+	}
+	for i := range newEntries {
+		msg := ApplyMsg{
+			Command:      newEntries[i].Command,
+			CommandValid: true,
+			CommandIndex: newEntries[i].Index,
+		}
+		rf.applyCh <- msg
+		// fmt.Printf("Peer %d applied message %d \n", rf.me, newEntries[i].Index)
+		appendIndex += 1
 	}
 
 	// #5
 	if args.LeaderCommit > rf.commitIndex {
+		//commitIndex = min(leaderCommit, index of last new entry)
 		if args.LeaderCommit < rf.logs[len(rf.logs)-1].Index {
 			rf.commitIndex = args.LeaderCommit
+			// fmt.Printf("Peer %d #5, setting commitindex to %d \n", rf.me, rf.commitIndex)
 		} else {
 			rf.commitIndex = rf.logs[len(rf.logs)-1].Index
 		}
 	}
+
+	reply.Success = true
+	reply.Term = args.Term
 
 }
 
@@ -337,9 +366,45 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := rf.commitIndex + 1
 	term := rf.currentTerm
 	isLeader := rf.role == Leader
-	fmt.Printf("start called on peer %d  \n", rf.me)
+	if isLeader {
+		// fmt.Printf("start called on leader #%d , index: %d, term: %d, command:  \n", rf.me, index, term)
+
+		// TODO: batching logic for logs?
+		logs := []Log{{
+			Term:    rf.currentTerm,
+			Index:   index,
+			Command: command,
+		}}
+
+		args := AppendEntriesArgs{
+			Term:         rf.currentTerm,
+			LeaderId:     rf.me,
+			PrevLogIndex: rf.commitIndex,
+			PrevLogTerm:  rf.logs[len(rf.logs)-1].Term,
+			Logs:         logs,
+			LeaderCommit: rf.commitIndex,
+		}
+
+		var successTally uint64 = 0
+		for i := range rf.peers {
+			reply := AppendEntriesReply{}
+			go func(k int, args AppendEntriesArgs, reply AppendEntriesReply, successTally *uint64) {
+				answer := rf.sendAppendEntries(k, &args, &reply)
+				if answer && reply.Success {
+					atomic.AddUint64(successTally, 1)
+					// set leader state to something
+				}
+
+				if atomic.LoadUint64(successTally) > uint64(len(rf.peers)/2) {
+					// fmt.Printf("Leader: %d, Majority nodes replied to log, comitting index: %d  \n", rf.me, index)
+					rf.mu.Lock()
+					rf.commitIndex = index
+					rf.mu.Unlock()
+				}
+			}(i, args, reply, &successTally)
+		}
+	}
 	rf.mu.Unlock()
-	// Your code here (2B).
 
 	return index, term, isLeader
 }
@@ -401,7 +466,7 @@ func (rf *Raft) heartbeat() {
 			args := AppendEntriesArgs{
 				Term:         rf.currentTerm,
 				LeaderId:     rf.me,
-				PrevLogIndex: 0, //TODO
+				PrevLogIndex: rf.commitIndex,
 				PrevLogTerm:  rf.currentTerm,
 				Logs:         make([]Log, 0), // TODO
 			}
@@ -428,7 +493,7 @@ func doLeaderElection(rf *Raft) {
 		rf.votedFor = rf.me
 		rf.role = Candidate
 		rf.currentTerm = rf.currentTerm + 1
-		fmt.Printf("%s \t Peer %d starting leader election at term: %d\n", time.Now().Truncate(time.Millisecond), rf.me, rf.currentTerm)
+		// fmt.Printf("%s \t Peer %d starting leader election at term: %d\n", time.Now().Truncate(time.Millisecond), rf.me, rf.currentTerm)
 		args := RequestVoteArgs{
 			Term:         rf.currentTerm,
 			CandidateId:  rf.me,
