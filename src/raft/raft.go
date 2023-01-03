@@ -88,6 +88,12 @@ type Raft struct {
 	//index of highest log entry applied to state machine
 	lastApplied int
 
+	// index of next log entry to send to each server
+	nextIndex []int
+
+	// index of highest log entry known to be replicated on each server
+	matchIndex []int
+
 	role          PeerStatus
 	lastHeartbeat time.Time
 	applyCh       chan ApplyMsg
@@ -245,8 +251,9 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesReply struct {
-	Term    int
-	Success bool
+	Term            int
+	Success         bool
+	PeerLastApplied int
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -258,6 +265,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	defer rf.mu.Unlock()
 
 	reply.Success = false
+	reply.PeerLastApplied = 0
 
 	if args.Term > rf.currentTerm {
 		rf.votedFor = -1
@@ -273,9 +281,16 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 
-	// fmt.Printf("Peer %d PrevLogIndex, %d \n", rf.me, args.PrevLogIndex)
-	if len(rf.logs) > args.PrevLogIndex && rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm {
-		// fmt.Printf("Peer %d #2 exit %d, %d \n", rf.me, rf.logs[args.PrevLogIndex].Term, args.PrevLogTerm)
+	fmt.Printf("Peer %d, Log length: %d,  PrevLogIndex: %d \n", rf.me, len(rf.logs), args.PrevLogIndex)
+	if len(rf.logs) <= args.PrevLogIndex {
+		fmt.Printf("Peer %d exit, Log length: %d, LTE PrevLogIndex: %d, %d \n", rf.me, len(rf.logs), args.PrevLogIndex, rf.lastApplied)
+		fmt.Printf("%d  %d\n", rf.logs, args.Logs)
+		reply.PeerLastApplied = rf.lastApplied
+		return
+	}
+
+	if rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm {
+		// fmt.Printf("Peer %d exit, rf.logs[args.PrevLogIndex].Term %d DNE args.PrevLogTerm: %d \n", rf.me, rf.logs[args.PrevLogIndex].Term, args.PrevLogIndex)
 		return
 	}
 
@@ -292,8 +307,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	appendIndex := 0
 	// check if any mismatching terms and delete from there
+	// fmt.Printf("#3: Peer %d  logindex %d \n", rf.me, logIndex)
 	if logIndex < len(rf.logs)-1 && logIndex > 0 {
-		for logIndex <= len(rf.logs)-1 {
+		for logIndex <= len(rf.logs)-1 && appendIndex < len(args.Logs) {
 			oldLog := rf.logs[logIndex]
 			newLog := args.Logs[appendIndex]
 
@@ -317,6 +333,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		// fmt.Printf("Peer %d #4, append new entries \n", rf.me)
 		rf.logs = append(rf.logs, newEntries...)
 	}
+
+	// fmt.Printf("Peer %d newEntries %d \n", rf.me, newEntries)
 	for i := range newEntries {
 		msg := ApplyMsg{
 			Command:      newEntries[i].Command,
@@ -324,7 +342,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			CommandIndex: newEntries[i].Index,
 		}
 		rf.applyCh <- msg
-		// fmt.Printf("Peer %d applied message %d \n", rf.me, newEntries[i].Index)
+		fmt.Printf("Peer %d applied message %d \n", rf.me, newEntries[i].Index)
 		appendIndex += 1
 	}
 
@@ -366,33 +384,56 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := rf.commitIndex + 1
 	term := rf.currentTerm
 	isLeader := rf.role == Leader
+	numPeers := len(rf.peers)
+	rf.mu.Unlock()
 	if isLeader {
 		// fmt.Printf("start called on leader #%d , index: %d, term: %d, command:  \n", rf.me, index, term)
 
-		// TODO: batching logic for logs?
-		logs := []Log{{
-			Term:    rf.currentTerm,
-			Index:   index,
-			Command: command,
-		}}
-
-		args := AppendEntriesArgs{
-			Term:         rf.currentTerm,
-			LeaderId:     rf.me,
-			PrevLogIndex: rf.commitIndex,
-			PrevLogTerm:  rf.logs[len(rf.logs)-1].Term,
-			Logs:         logs,
-			LeaderCommit: rf.commitIndex,
-		}
-
 		var successTally uint64 = 0
-		for i := range rf.peers {
-			reply := AppendEntriesReply{}
-			go func(k int, args AppendEntriesArgs, reply AppendEntriesReply, successTally *uint64) {
+		fmt.Printf("The address of successTally is: %p\n", &successTally)
+		fmt.Printf("The address of command is: %p\n", &command)
+		for i := 0; i < numPeers; i++ {
+			go func(k int, j interface{}, ind int, successTally *uint64) {
+				rf.mu.Lock()
+				nextIndex := rf.nextIndex[k]
+				logs := rf.logs[nextIndex:]
+
+				logs = append(logs, Log{
+					Term:    rf.currentTerm,
+					Index:   ind,
+					Command: j,
+				})
+
+				fmt.Printf("The address of k is: %p\n", &k)
+				fmt.Printf("The address of logs is: %p\n", &logs)
+				fmt.Printf("The address of index is: %p\n", &index)
+				fmt.Printf("The address of rf.currentTerm is: %p\n", &rf.currentTerm)
+
+				args := AppendEntriesArgs{
+					Term:         rf.currentTerm,
+					LeaderId:     rf.me,
+					PrevLogIndex: rf.commitIndex,
+					PrevLogTerm:  rf.logs[len(rf.logs)-1].Term,
+					Logs:         logs,
+					LeaderCommit: rf.commitIndex,
+				}
+				reply := AppendEntriesReply{}
+				rf.mu.Unlock()
+
 				answer := rf.sendAppendEntries(k, &args, &reply)
 				if answer && reply.Success {
 					atomic.AddUint64(successTally, 1)
+					rf.mu.Lock()
+					rf.nextIndex[k] = ind + 1
+					rf.matchIndex[k] = ind + 1
+					rf.mu.Unlock()
 					// set leader state to something
+				} else if answer && !reply.Success {
+
+					fmt.Printf("Leader %d: False AE response received from Peer %d, where lastapplied was: %d  \n", rf.me, k, reply.PeerLastApplied)
+					rf.mu.Lock()
+					rf.nextIndex[k] -= 1
+					rf.mu.Unlock()
 				}
 
 				if atomic.LoadUint64(successTally) > uint64(len(rf.peers)/2) {
@@ -401,10 +442,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 					rf.commitIndex = index
 					rf.mu.Unlock()
 				}
-			}(i, args, reply, &successTally)
+			}(i, command, index, &successTally)
 		}
 	}
-	rf.mu.Unlock()
 
 	return index, term, isLeader
 }
@@ -533,7 +573,7 @@ func handleLeaderVote(rf *Raft, args RequestVoteArgs, reply RequestVoteReply, ye
 		blankArgs := AppendEntriesArgs{
 			Term:         rf.currentTerm,
 			LeaderId:     rf.me,
-			PrevLogIndex: 0, //TODO
+			PrevLogIndex: 0,
 			PrevLogTerm:  rf.currentTerm,
 			Logs:         make([]Log, 0),
 		}
@@ -568,6 +608,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.role = Follower
 	rf.logs = make([]Log, 0)
 	rf.logs = append(rf.logs, Log{Term: 0})
+	rf.nextIndex = make([]int, len(peers))
+	rf.matchIndex = make([]int, len(peers))
+	for i := 0; i < len(peers); i++ {
+		rf.nextIndex[i] = 1
+		rf.matchIndex[i] = 0
+	}
 	rf.lastHeartbeat = time.Now()
 	rf.commitIndex = 0
 	rf.lastApplied = 0
